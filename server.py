@@ -217,9 +217,27 @@ async def synthesize(request: SynthesizeRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _make_wav_chunk(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, bits: int = 16) -> bytes:
+    """Wrappa raw PCM data in un container WAV (44-byte header + data)."""
+    byte_rate = sample_rate * channels * bits // 8
+    block_align = channels * bits // 8
+    header = struct.pack(
+        '<4sI4s4sIHHIIHH4sI',
+        b'RIFF', 36 + len(pcm_data), b'WAVE',
+        b'fmt ', 16, 1, channels, sample_rate, byte_rate, block_align, bits,
+        b'data', len(pcm_data),
+    )
+    return header + pcm_data
+
+
 @app.post("/synthesize/stream")
 async def synthesize_stream(request: SynthesizeRequest):
-    """Streaming TTS via ElevenLabs streaming endpoint."""
+    """Streaming TTS via ElevenLabs streaming endpoint.
+
+    Usa output_format=pcm_24000 per ricevere raw PCM da ElevenLabs e wrappa
+    ogni chunk in un header WAV — così il frontend può decodificare ogni chunk
+    individualmente con audioContext.decodeAudioData() come gli altri backend.
+    """
     if not ELEVENLABS_API_KEY:
         raise HTTPException(status_code=503, detail="ElevenLabs API key not configured")
 
@@ -235,7 +253,8 @@ async def synthesize_stream(request: SynthesizeRequest):
         else:
             voice_id = "21m00Tcm4TlvDq8ikWAM"
 
-    url = f"{ELEVENLABS_BASE_URL}/text-to-speech/{voice_id}/stream"
+    # output_format=pcm_24000: raw PCM 16-bit mono 24kHz, chunk-decodabile come WAV
+    url = f"{ELEVENLABS_BASE_URL}/text-to-speech/{voice_id}/stream?output_format=pcm_24000"
     headers = {
         "xi-api-key": ELEVENLABS_API_KEY,
         "Content-Type": "application/json",
@@ -249,16 +268,31 @@ async def synthesize_stream(request: SynthesizeRequest):
         },
     }
 
+    # 0.2s di audio per chunk: 4800 campioni × 2 byte = 9600 byte
+    PCM_CHUNK_BYTES = 9600
+
     async def audio_generator():
         try:
             async with http_client.stream("POST", url, headers=headers, json=payload) as response:
                 response.raise_for_status()
 
-                # Stream audio chunks from ElevenLabs
+                pcm_buf = b""
                 async for chunk in response.aiter_bytes(chunk_size=4096):
                     if chunk:
-                        # Length-prefix format for consistency with other backends
-                        yield struct.pack('<I', len(chunk)) + chunk
+                        pcm_buf += chunk
+                        # Emetti chunk WAV ogni volta che abbiamo abbastanza PCM
+                        while len(pcm_buf) >= PCM_CHUNK_BYTES:
+                            pcm_data = pcm_buf[:PCM_CHUNK_BYTES]
+                            pcm_buf = pcm_buf[PCM_CHUNK_BYTES:]
+                            wav = _make_wav_chunk(pcm_data)
+                            yield struct.pack('<I', len(wav)) + wav
+
+                # Flush PCM rimanente (allinea a 2 byte per campione 16-bit)
+                if len(pcm_buf) > 1:
+                    if len(pcm_buf) % 2:
+                        pcm_buf = pcm_buf[:-1]
+                    wav = _make_wav_chunk(pcm_buf)
+                    yield struct.pack('<I', len(wav)) + wav
 
             # End-of-stream signal
             yield struct.pack('<I', 0)
