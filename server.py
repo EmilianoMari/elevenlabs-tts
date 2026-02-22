@@ -25,7 +25,7 @@ ELEVENLABS_BASE_URL = "https://api.elevenlabs.io/v1"
 
 # Model IDs
 MODEL_TURBO_V2_5 = "eleven_turbo_v2_5"
-MODEL_MULTILINGUAL_V3 = "eleven_multilingual_v2"  # v3 is branded as v2 in API
+MODEL_MULTILINGUAL_V3 = "eleven_multilingual_v3"
 
 # Supported languages (subset for UI)
 SUPPORTED_LANGUAGES = {
